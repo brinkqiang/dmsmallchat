@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.8)
 
-PROJECT(dmconfigserver)
+PROJECT(dmsmallchat)
 INCLUDE(cmake/ModuleImport.cmake)
 INCLUDE(cmake/ModuleCompileOptions.cmake)
 ModuleSetCompileOptions()

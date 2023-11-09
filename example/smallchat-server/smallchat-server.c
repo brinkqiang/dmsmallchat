@@ -32,8 +32,13 @@
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
 #include <sys/select.h>
 #include <unistd.h>
+#endif
 
 #include "chatlib.h"
 
@@ -94,7 +99,7 @@ struct client *createClient(int fd) {
  * state in Chat. */
 void freeClient(struct client *c) {
     free(c->nick);
-    close(c->fd);
+    close_socket(c->fd);
     Chat->clients[c->fd] = NULL;
     Chat->numclients--;
     if (Chat->maxclient == c->fd) {
@@ -138,7 +143,7 @@ void sendMsgToAllClientsBut(int excluded, char *s, size_t len) {
         /* Important: we don't do ANY BUFFERING. We just use the kernel
          * socket buffers. If the content does not fit, we don't care.
          * This is needed in order to keep this program simple. */
-        write(Chat->clients[j]->fd,s,len);
+        send_data(Chat->clients[j]->fd,s,len);
     }
 }
 
@@ -147,6 +152,14 @@ void sendMsgToAllClientsBut(int excluded, char *s, size_t len) {
  * 2. Check if any client sent us some new message.
  * 3. Send the message to all the other clients. */
 int main(void) {
+#ifdef _WIN32
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2,2), &wsaData) != 0) {
+        perror("Failed to initialize winsock");
+        return -1;
+    }
+#endif
+
     initChat();
 
     while(1) {
@@ -189,7 +202,7 @@ int main(void) {
                 char *welcome_msg =
                     "Welcome to Simple Chat! "
                     "Use /nick <nick> to set your nick.\n";
-                write(c->fd,welcome_msg,strlen(welcome_msg));
+                send_data(c->fd,welcome_msg,strlen(welcome_msg));
                 printf("Connected client fd=%d\n", fd);
             }
 
@@ -204,7 +217,7 @@ int main(void) {
                      * that we read just half a message. In a normal program
                      * that is not designed to be that simple, we should try
                      * to buffer reads until the end-of-the-line is reached. */
-                    int nread = read(j,readbuf,sizeof(readbuf)-1);
+                    int nread = receive_data(j,readbuf,sizeof(readbuf)-1);
 
                     if (nread <= 0) {
                         /* Error or short read means that the socket
@@ -243,7 +256,7 @@ int main(void) {
                             } else {
                                 /* Unsupported command. Send an error. */
                                 char *errmsg = "Unsupported command\n";
-                                write(c->fd,errmsg,strlen(errmsg));
+                                send_data(c->fd,errmsg,strlen(errmsg));
                             }
                         } else {
                             /* Create a message to send everybody (and show
