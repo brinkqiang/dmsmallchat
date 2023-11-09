@@ -1,8 +1,4 @@
 #include <sys/types.h>
-#ifdef _WIN32
-#include <winsock2.h>
-#pragma comment(lib, "ws2_32.lib")
-#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -11,7 +7,6 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <errno.h>
-#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,52 +17,19 @@
  * crazy goals for the future of C: like to make the whole language an
  * Undefined Behavior.
  * =========================================================================== */
-int create_socket()
-{
-    int sockfd;
-
-    #ifdef _WIN32
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    #else
-    sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    #endif
-    
-    return sockfd;
-}
-
-void close_socket(int sockfd)
-{
-    #ifdef _WIN32
-    closesocket(sockfd);
-    #else
-    close(sockfd);
-    #endif
-}
-
-int send_data(int sockfd, const void* buf, int len)
-{
-    return send(sockfd, buf, len, 0);
-}
-
-int receive_data(int sockfd, void* buf, int len)
-{
-    return recv(sockfd, buf, len, 0);
-}
 
 /* Set the specified socket in non-blocking mode, with no delay flag. */
 int socketSetNonBlockNoDelay(int fd) {
     int flags, yes = 1;
 
-#ifdef _WIN32
-    u_long nonBlockingMode = 1;
-    if (ioctlsocket(fd, FIONBIO, &nonBlockingMode) != 0) return -1;
-#else
+    /* Set the socket nonblocking.
+     * Note that fcntl(2) for F_GETFL and F_SETFL can't be
+     * interrupted by a signal. */
     if ((flags = fcntl(fd, F_GETFL)) == -1) return -1;
     if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) return -1;
-#endif
 
     /* This is best-effort. No need to check for errors. */
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (char*)&yes, sizeof(yes));
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
     return 0;
 }
 
@@ -75,8 +37,8 @@ int socketSetNonBlockNoDelay(int fd) {
 int createTCPServer(int port) {
     int s, yes = 1;
     struct sockaddr_in sa;
-    
-    if ((s = create_socket()) == -1) return -1;
+
+    if ((s = socket(AF_INET, SOCK_STREAM, 0)) == -1) return -1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)); // Best effort.
 
     memset(&sa,0,sizeof(sa));
@@ -87,7 +49,7 @@ int createTCPServer(int port) {
     if (bind(s,(struct sockaddr*)&sa,sizeof(sa)) == -1 ||
         listen(s, 511) == -1)
     {
-        close_socket(s);
+        close(s);
         return -1;
     }
     return s;
@@ -120,7 +82,7 @@ int TCPConnect(char *addr, int port, int nonblock) {
 
         /* Put in non blocking state if needed. */
         if (nonblock && socketSetNonBlockNoDelay(s) == -1) {
-            close_socket(s);
+            close(s);
             break;
         }
 
@@ -131,7 +93,7 @@ int TCPConnect(char *addr, int port, int nonblock) {
             if (errno == EINPROGRESS && nonblock) return s;
 
             /* Otherwise it's an error. */
-            close_socket(s);
+            close(s);
             break;
         }
 
@@ -153,7 +115,7 @@ int acceptClient(int server_socket) {
 
     while(1) {
         struct sockaddr_in sa;
-        size_t slen = sizeof(sa);
+        socklen_t slen = sizeof(sa);
         s = accept(server_socket,(struct sockaddr*)&sa,&slen);
         if (s == -1) {
             if (errno == EINTR)

@@ -32,18 +32,10 @@
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
-
-
-#ifdef _WIN32
-#include <winsock2.h>
-#include <windows.h>
-#include <conio.h>
-#else
+#include <sys/select.h>
 #include <unistd.h>
 #include <termios.h>
 #include <errno.h>
-#include <sys/select.h>
-#endif
 
 #include "chatlib.h"
 
@@ -53,102 +45,62 @@
 
 void disableRawModeAtExit(void);
 
-#ifdef _WIN32
-
-/* Windows specific raw mode implementation. */
+/* Raw mode: 1960 magic shit. */
 int setRawMode(int fd, int enable) {
     /* We have a bit of global state (but local in scope) here.
      * This is needed to correctly set/undo raw mode. */
-    static HANDLE orig_con_handle = INVALID_HANDLE_VALUE; // Save original console handle.
+    static struct termios orig_termios; // Save original terminal status here.
     static int atexit_registered = 0;   // Avoid registering atexit() many times.
     static int rawmode_is_set = 0;      // True if raw mode was enabled.
 
-    if (enable) {
-        /* Enable raw mode. */
-        if (!atexit_registered) {
-            atexit(disableRawModeAtExit);
-            atexit_registered = 1;
-        }
-        if (rawmode_is_set) return 0; // The console is already in raw mode.
+    struct termios raw;
 
-        HANDLE con_handle = GetStdHandle(STD_INPUT_HANDLE);
-        if (con_handle == INVALID_HANDLE_VALUE || !GetConsoleMode(con_handle, &orig_con_handle)) {
-            errno = ENOTTY;
-            return -1;
-        }
-        DWORD mode = orig_con_handle;
-        if (!SetConsoleMode(con_handle, mode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))) {
-            errno = ENOTTY;
-            return -1;
-        }
-        orig_con_handle = con_handle;
-        rawmode_is_set = 1;
-    } else {
-        /* Disable raw mode. */
-        if (!rawmode_is_set) return 0; // The console is not in raw mode.
-        HANDLE con_handle = orig_con_handle;
-        DWORD mode = orig_con_handle;
-        if (!SetConsoleMode(con_handle, mode)) {
-            errno = ENOTTY;
-            return -1;
-        }
-        rawmode_is_set = 0;
+    /* If enable is zero, we just have to disable raw mode if it is
+     * currently set. */
+    if (enable == 0) {
+        /* Don't even check the return value as it's too late. */
+        if (rawmode_is_set && tcsetattr(fd,TCSAFLUSH,&orig_termios) != -1)
+            rawmode_is_set = 0;
+        return 0;
     }
 
-    return 0;
-}
-
-
-#else
-
-/* Unix specific raw mode implementation. */
-int setRawMode(int fd, int enable) {
-    /* We have a bit of global state (but local in scope) here.
-     * This is needed to correctly set/undo raw mode. */
-    static struct termios orig_termios;
-    static int atexit_registered = 0;
-    static int rawmode_is_set = 0;
-
-    if (enable) {
-        /* Enable raw mode. */
-        if (!atexit_registered) {
-            atexit(disableRawModeAtExit);
-            atexit_registered = 1;
-        }
-        if (rawmode_is_set) return 0; // The terminal is already in raw mode.
-        if (tcgetattr(fd, &orig_termios) == -1) {
-            errno = ENOTTY;
-            return -1;
-        }
-        struct termios raw = orig_termios;
-        cfmakeraw(&raw);
-        if (tcsetattr(fd, TCSANOW, &raw) == -1) {
-            errno = ENOTTY;
-            return -1;
-        }
-        rawmode_is_set = 1;
-    } else {
-        /* Disable raw mode. */
-        if (!rawmode_is_set) return 0; // The terminal is not in raw mode.
-        if (tcsetattr(fd, TCSANOW, &orig_termios) == -1) {
-            errno = ENOTTY;
-            return -1;
-        }
-        rawmode_is_set = 0;
+    /* Enable raw mode. */
+    if (!isatty(fd)) goto fatal;
+    if (!atexit_registered) {
+        atexit(disableRawModeAtExit);
+        atexit_registered = 1;
     }
+    if (tcgetattr(fd,&orig_termios) == -1) goto fatal;
 
+    raw = orig_termios;  /* modify the original mode */
+    /* input modes: no break, no CR to NL, no parity check, no strip char,
+     * no start/stop output control. */
+    raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    /* output modes - do nothing. We want post processing enabled so that
+     * \n will be automatically translated to \r\n. */
+    // raw.c_oflag &= ...
+    /* control modes - set 8 bit chars */
+    raw.c_cflag |= (CS8);
+    /* local modes - choing off, canonical off, no extended functions,
+     * but take signal chars (^Z,^C) enabled. */
+    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN);
+    /* control chars - set return condition: min number of bytes and timer.
+     * We want read to return every single byte, without timeout. */
+    raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; /* 1 byte, no timer */
+
+    /* put terminal in raw mode after flushing */
+    if (tcsetattr(fd,TCSAFLUSH,&raw) < 0) goto fatal;
+    rawmode_is_set = 1;
     return 0;
+
+fatal:
+    errno = ENOTTY;
+    return -1;
 }
 
-#endif
 /* At exit we'll try to fix the terminal to the initial conditions. */
 void disableRawModeAtExit(void) {
-#ifdef _WIN32
-    setRawMode(_fileno(stdin),0);
-#else
     setRawMode(STDIN_FILENO,0);
-#endif
-
 }
 
 /* ============================================================================
@@ -238,13 +190,7 @@ int main(int argc, char **argv) {
         printf("Usage: %s <host> <port>\n", argv[0]);
         exit(1);
     }
-#ifdef _WIN32
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2,2), &wsaData) != 0) {
-        perror("Failed to initialize winsock");
-        return -1;
-    }
-#endif
+
     /* Create a TCP connection with the server. */
     int s = TCPConnect(argv[1],atoi(argv[2]),0);
     if (s == -1) {
@@ -255,19 +201,13 @@ int main(int argc, char **argv) {
     /* Put the terminal in raw mode: this way we will receive every
      * single key stroke as soon as the user types it. No buffering
      * nor translation of escape sequences of any kind. */
-#ifdef _WIN32
-    //setRawMode(_fileno(stdin),1);
-#else
-    setRawMode(STDIN_FILENO,1);
-#endif
+    setRawMode(fileno(stdin),1);
+
     /* Wait for the standard input or the server socket to
      * have some data. */
     fd_set readfds;
-#ifdef _WIN32
-    int stdin_fd = _fileno(stdin);
-#else
     int stdin_fd = fileno(stdin);
-#endif
+
     struct InputBuffer ib;
     inputBufferClear(&ib);
 
@@ -286,7 +226,7 @@ int main(int argc, char **argv) {
 
             if (FD_ISSET(s, &readfds)) {
                 /* Data from the server? */
-                size_t count = read(s,buf,sizeof(buf));
+                ssize_t count = read(s,buf,sizeof(buf));
                 if (count <= 0) {
                     printf("Connection lost\n");
                     exit(1);
@@ -296,7 +236,7 @@ int main(int argc, char **argv) {
                 inputBufferShow(&ib);
             } else if (FD_ISSET(stdin_fd, &readfds)) {
                 /* Data from the user typing on the terminal? */
-                size_t count = read(stdin_fd,buf,sizeof(buf));
+                ssize_t count = read(stdin_fd,buf,sizeof(buf));
                 for (int j = 0; j < count; j++) {
                     int res = inputBufferFeedChar(&ib,buf[j]);
                     switch(res) {
@@ -305,7 +245,7 @@ int main(int argc, char **argv) {
                         inputBufferHide(&ib);
                         write(fileno(stdout),"you> ", 5);
                         write(fileno(stdout),ib.buf,ib.len);
-                        send_data(s,ib.buf,ib.len);
+                        write(s,ib.buf,ib.len);
                         inputBufferClear(&ib);
                         break;
                     case IB_OK:
@@ -316,6 +256,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    close_socket(s);
+    close(s);
     return 0;
 }
